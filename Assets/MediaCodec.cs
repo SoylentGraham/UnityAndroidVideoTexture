@@ -5,23 +5,29 @@ using System;
 
 //	http://bigflake.com/mediacodec/ExtractMpegFramesTest_egl14.java.txt
 
+class TVideoDecoder
+{
+	public AndroidJavaObject	Surface;
+	public AndroidJavaObject	SurfaceTexture;
+	public AndroidJavaObject	Decoder;
+	public Texture2D			Texture;
+};
 
 class TMediaFormat
 {
 	public int		Width = 0;
 	public int		Height = 0;
 	public String	Mime = "";
-
-	public bool		IsValid()
-	{
-		return Width > 0 && Height > 0;
-	}
+	public AndroidJavaObject	Format = null;
 };
 
 public class MediaCodec : MonoBehaviour {
 
 	public string mFilename = "stadium.ogg";
 	private static string mLog = "Init\n";
+
+	[NonSerialized]
+	private TVideoDecoder mDecoder;
 
 	static void Log(String Message)	{
 			mLog += Message + "\n";
@@ -80,7 +86,6 @@ public class MediaCodec : MonoBehaviour {
 			mLog += "setDataSource " + LoadFilename + "\n";
 			extractor.Call("setDataSource",LoadFilename);
 
-			return extractor;
 			int TrackCount = extractor.Call<int>("getTrackCount");
 			mLog += "tracks: " + TrackCount + "\n";
 			int TrackIndex = 0;
@@ -112,18 +117,19 @@ public class MediaCodec : MonoBehaviour {
 		Log ("getTrackFormat " + TrackIndex);
 		try
 		{
-			AndroidJavaObject format = Extractor.Call<AndroidJavaObject>("getTrackFormat",TrackIndex);
-			String FormatDescription = format.Call<String>("toString");
+			TMediaFormat MediaFormat = new TMediaFormat();
+			MediaFormat.Format = Extractor.Call<AndroidJavaObject>("getTrackFormat",TrackIndex);
+			String FormatDescription = MediaFormat.Format.Call<String>("toString");
 			Log("format.toString() = " + FormatDescription );
 			
 			//	sdk literals
 			const String KEY_MIME = "mime";
 			const String KEY_WIDTH = "width";
 			const String KEY_HEIGHT = "height";
-			TMediaFormat MediaFormat = new TMediaFormat();
-			MediaFormat.Mime = format.Call<string>("getString", KEY_MIME );
-			MediaFormat.Width = format.Call<int>("getInteger", KEY_WIDTH );
-			MediaFormat.Height = format.Call<int>("getInteger", KEY_HEIGHT );
+
+			MediaFormat.Mime = MediaFormat.Format.Call<string>("getString", KEY_MIME );
+			MediaFormat.Width = MediaFormat.Format.Call<int>("getInteger", KEY_WIDTH );
+			MediaFormat.Height = MediaFormat.Format.Call<int>("getInteger", KEY_HEIGHT );
 			return MediaFormat;
 		}
 		catch ( Exception e )
@@ -133,6 +139,43 @@ public class MediaCodec : MonoBehaviour {
 		}
 	}
 
+	static TVideoDecoder CreateDecoder(AndroidJavaObject Extractor,TMediaFormat Format)
+	{
+		TVideoDecoder Decoder = new TVideoDecoder ();
+		Decoder.Texture = new Texture2D (Format.Width, Format.Height);
+		Decoder.Texture.SetPixel(0,0,Color.magenta);
+		Decoder.Texture.Apply();
+
+		try
+		{
+			int TextureId = Decoder.Texture.GetNativeTextureID();
+			Decoder.SurfaceTexture = new AndroidJavaObject("android.graphics.SurfaceTexture", TextureId );
+			Decoder.Surface = new AndroidJavaObject("android.view.Surface", Decoder.SurfaceTexture );
+		}
+		catch ( Exception e )
+		{
+			Log ("CreateDecoder::surface:: " + e.Message );
+			return null;
+		}
+
+		try
+		{
+			Log ("Creating codec for " + Format.Mime );
+			AndroidJavaClass MediaCodecClass = new AndroidJavaClass("android.media.MediaCodec");
+			Decoder.Decoder = MediaCodecClass.CallStatic<AndroidJavaObject>("createDecoderByType", Format.Mime );
+
+			//	"configure not found" when supplying surface....
+			Decoder.Decoder.Call("configure", Format.Format, Decoder.Surface, null, 0);
+			Decoder.Decoder.Call("start");
+		}
+		catch ( Exception e )
+		{
+			Log ("CreateDecoder::create decoder:: " + e.Message );
+			return null;
+		}
+
+		return Decoder;
+	}
 
 	// Use this for initialization
 	void Start () {
@@ -147,8 +190,14 @@ public class MediaCodec : MonoBehaviour {
 		Log ("Format of track is " + Format.Mime + " " + Format.Width + "x" + Format.Height);
 		//jo.Call<android.media.MediaCodec>("createDecoderByType");
 
+		mDecoder = CreateDecoder (Extractor, Format);
+
+		DecodeFrame ();
 	}
 
+	void DecodeFrame()
+	{
+	}
 
 	// Update is called once per frame
 	void Update () {
@@ -163,5 +212,13 @@ public class MediaCodec : MonoBehaviour {
 		Size = 20;
 #endif
 		GUI.Label (new Rect (0, 0, Screen.width, Screen.height), "<size=" + Size + ">" + mLog + "</size>");
+
+
+		if (mDecoder!=null && mDecoder.Texture) {
+			int Width = mDecoder.Texture.width;
+			int Height =  mDecoder.Texture.height;
+			GUI.DrawTexture( new Rect ( Screen.width - Width, 0, Width, Height ), mDecoder.Texture );
 		}
+
+	}
 }
