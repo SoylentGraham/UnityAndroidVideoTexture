@@ -192,33 +192,113 @@ public class MediaCodec : MonoBehaviour {
 
 		mDecoder = CreateDecoder (Extractor, Format);
 
-		DecodeFrame ();
+		try
+		{
+			DecodeFrame (Extractor);
+		}
+		catch ( Exception e )
+		{
+			Log ("decode frame Exception: " + e.Message);
+		}
 	}
 
-	void DecodeFrame()
+	bool DecodeFrame(AndroidJavaObject Extractor)
 	{
-	}
+		AndroidJavaObject Decoder = mDecoder.Decoder;
+		const int TIMEOUT_USEC = -1;
+		const int INFO_TRY_AGAIN_LATER = -1;
+		const int INFO_OUTPUT_BUFFERS_CHANGED = -3;
+		const int INFO_OUTPUT_FORMAT_CHANGED = -2;
+		const int OTHER_ERROR = -99;
+		const int BUFFER_FLAG_END_OF_STREAM = 0x00000004;
+		
+		//	get input buffer for codec
+		int InputBufferIndex = Decoder.Call<int> ("dequeueInputBuffer", TIMEOUT_USEC);
+		Log ("dequeued decoder buffer " + InputBufferIndex);
+		if (InputBufferIndex < 0)
+			return false;
+		AndroidJavaObject InputByteBuffer = Decoder.Call<AndroidJavaObject> ("getInputBuffer", InputBufferIndex);
 
+		//	pull latest data from extractor
+		int ChunkSize = Extractor.Call<int> ("readSampleData", InputByteBuffer, 0);
+		Log ("Extracted chunk size " + ChunkSize);
+		if (ChunkSize < 0)
+			ChunkSize = 0;
+		long presentationTimeUs = Extractor.Call<long> ("getSampleTime");
+		Log ("decoder presentation timed " + presentationTimeUs);
+
+		//	fill
+		//	send to decoder
+		int Flags = ChunkSize==0 ? BUFFER_FLAG_END_OF_STREAM : 0;
+		Decoder.Call("queueInputBuffer", InputBufferIndex, 0, ChunkSize, presentationTimeUs, Flags );
+
+		Extractor.Call("advance");	//	gr: can we put this with read?
+
+		AndroidJavaObject BufferInfo = new AndroidJavaObject("android.media.MediaCodec.BufferInfo");
+		while ( true )
+		{
+			//	returns status if not buffer index
+			int OutputBufferIndex = Decoder.Call<int>("dequeueOutputBuffer", BufferInfo, TIMEOUT_USEC );
+			Log ("decoder output buffer " + OutputBufferIndex);
+
+			bool Ready = true;
+			if ( OutputBufferIndex < 0 )
+				OutputBufferIndex = OTHER_ERROR;
+			switch ( OutputBufferIndex )
+			{
+			case INFO_TRY_AGAIN_LATER:
+			case INFO_OUTPUT_BUFFERS_CHANGED:
+			case INFO_OUTPUT_FORMAT_CHANGED:
+			case OTHER_ERROR:
+				Ready = false;
+				break;
+			}
+			if ( !Ready )
+				continue;
+
+			bool EndOfStream = (BufferInfo.Get<int>("flags") & BUFFER_FLAG_END_OF_STREAM) != 0;
+			if ( EndOfStream )
+			{
+				Log ("end of output stream");
+				break;
+			}
+
+			bool DoRender = ( BufferInfo.Get<int>("size") != 0 );
+
+			// As soon as we call releaseOutputBuffer, the buffer will be forwarded
+			// to SurfaceTexture to convert to a texture.  The API doesn't guarantee
+			// that the texture will be available before the call returns, so we
+			// need to wait for the onFrameAvailable callback to fire.
+			Decoder.Call("releaseOutputBuffer", OutputBufferIndex, DoRender);
+		//	outputSurface.awaitNewImage();
+		//	outputSurface.drawImage(true);
+	
+			break;
+		}		             
+
+		return true;
+	}
+	
 	// Update is called once per frame
 	void Update () {
-
+		
 	}
-
+	
 	void OnGUI()
 	{
 		GUI.skin.button.wordWrap = true;
 		int Size = 60;
-#if UNITY_EDITOR
+		#if UNITY_EDITOR
 		Size = 20;
-#endif
+		#endif
 		GUI.Label (new Rect (0, 0, Screen.width, Screen.height), "<size=" + Size + ">" + mLog + "</size>");
-
-
+		
+		
 		if (mDecoder!=null && mDecoder.Texture) {
 			int Width = mDecoder.Texture.width;
 			int Height =  mDecoder.Texture.height;
 			GUI.DrawTexture( new Rect ( Screen.width - Width, 0, Width, Height ), mDecoder.Texture );
 		}
-
+		
 	}
 }
