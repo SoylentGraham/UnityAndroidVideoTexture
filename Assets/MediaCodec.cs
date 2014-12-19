@@ -44,6 +44,7 @@ public class MediaCodec : MonoBehaviour {
 	private AndroidJavaObject mExtractor;
 	private bool mFinishedExtracting = false;
 	private bool mFinishedDecoding = false;
+	private bool mInitialised = false;
 
 	const long TIMEOUT_USEC = 100;
 	const int INFO_TRY_AGAIN_LATER = -1;
@@ -51,6 +52,7 @@ public class MediaCodec : MonoBehaviour {
 	const int INFO_OUTPUT_FORMAT_CHANGED = -2;
 	const int OTHER_ERROR = -99;
 	const int BUFFER_FLAG_END_OF_STREAM = 0x00000004;
+	const int GL_TEXTURE_EXTERNAL_OES = 0x00008d65;
 
 	public static void Log(String Message)
 	{
@@ -164,19 +166,40 @@ public class MediaCodec : MonoBehaviour {
 			return null;
 		}
 	}
-	
+
 	static Texture2D CreateDecoderTexture(int Width,int Height)
 	{
-		Texture2D texture = new Texture2D (Width, Height);
-		texture.SetPixel(0,0,Color.magenta);
-		texture.Apply();
-		return texture;
+		//	create a texture via java's low level gl access
+		AndroidJavaClass GLES20 = new AndroidJavaClass ("android.opengl.GLES20");
+		int[] Textures = new int[1];
+		GLES20.CallStatic ("glGenTextures", 1, Textures, 0 );
+		if (!glGetError ("glGenTextures"))
+			return null;
+		if (Textures [0] == 0) {
+			Log ("Failed to generate texture");
+			return null;
+		}
+		Texture2D UnityTexture = new Texture2D (Width,Height);
+		IntPtr TextureId = (IntPtr)Textures [0];
+		UnityTexture.UpdateExternalTexture ( TextureId );
+		return UnityTexture;
+		/*
+		GLES20.CallStatic                  glBindTexture(GL_TEXTURE_EXTERNAL_OES, textureId);
+		                  glTexParameterf(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		                  glTexParameterf(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		                  glTexParameterf(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		                  glTexParameterf(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		                  glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+		                  
+*/
 	}
 
 	static TVideoDecoder CreateDecoder(AndroidJavaObject Extractor,TMediaFormat Format)
 	{
 		TVideoDecoder Decoder = new TVideoDecoder ();
 		Decoder.Texture = CreateDecoderTexture (Format.Width,Format.Height);
+		if (Decoder.Texture == null)
+			return null;
 
 		try
 		{
@@ -226,8 +249,7 @@ public class MediaCodec : MonoBehaviour {
 	}
 
 
-	// Use this for initialization
-	void Start () {
+	void Init () {
 
 		int SdkLevel = GetAndroidSDKLevel ();
 		Log ("Android SDK " + SdkLevel);
@@ -243,7 +265,7 @@ public class MediaCodec : MonoBehaviour {
 		//jo.Call<android.media.MediaCodec>("createDecoderByType");
 
 		mDecoder = CreateDecoder (mExtractor, Format);
-
+		mInitialised = true;
 	
 	}
 
@@ -344,14 +366,14 @@ Truman:android-21 grahamr$ javap -classpath android.jar -s android.media.MediaCo
 		return true;
 	}
 
-	bool glGetError()
+	static bool glGetError(string LastFunction)
 	{
 		AndroidJavaClass GLES20 = new AndroidJavaClass ("android.opengl.GLES20");
 		int Error = GLES20.CallStatic<int> ("glGetError");
 		if (Error == 0)
 				return true;
 
-		Log ("GL error: " + Error);
+		Log ("GL error: " + Error + " after " + LastFunction );
 		return false;
 	}
 
@@ -425,19 +447,29 @@ Truman:android-21 grahamr$ javap -classpath android.jar -s android.media.MediaCo
 		// that the texture will be available before the call returns, so we
 		// need to wait for the onFrameAvailable callback to fire.
 		Decoder.Call("releaseOutputBuffer", OutputBufferIndex, DoRender);
-		glGetError();
+		glGetError("releaseOutputBuffer");
 		mDecoder.SurfaceTexture.Call ("updateTexImage");
-		glGetError ();
+		glGetError ("updateTexImage");
 		//	outputSurface.awaitNewImage();
 		//	outputSurface.drawImage(true);
 		
 		return true;
 	}
 
+	//	have to init in render thread so we can do GL stuff
+	void OnPostRender()
+	{
+		if (!mInitialised)
+			Init ();
+	}
 
 	// Update is called once per frame
 	void Update () {
 
+			if ( !mInitialised )
+				return;
+		
+		/*
 		if ( !mFinishedExtracting )
 		{
 			try
@@ -461,6 +493,7 @@ Truman:android-21 grahamr$ javap -classpath android.jar -s android.media.MediaCo
 				Log ("UpdateCodecOutput:: " + e.Message);
 			}
 		}
+		*/
 	}
 	
 	void OnGUI()
