@@ -15,11 +15,23 @@ class TVideoDecoder
 
 class TMediaFormat
 {
+	public int		ColourFormat = -1;
 	public int		Width = 0;
 	public int		Height = 0;
 	public String	Mime = "";
+	public String 	Description = "";
 	public AndroidJavaObject	Format = null;
+
+	public TMediaFormat()
+	{
+	}
+
+	public TMediaFormat(AndroidJavaObject MediaFormat)
+	{
+		Format = MediaFormat;
+	}
 };
+
 
 public class MediaCodec : MonoBehaviour {
 
@@ -152,13 +164,19 @@ public class MediaCodec : MonoBehaviour {
 			return null;
 		}
 	}
+	
+	static Texture2D CreateDecoderTexture(int Width,int Height)
+	{
+		Texture2D texture = new Texture2D (Width, Height);
+		texture.SetPixel(0,0,Color.magenta);
+		texture.Apply();
+		return texture;
+	}
 
 	static TVideoDecoder CreateDecoder(AndroidJavaObject Extractor,TMediaFormat Format)
 	{
 		TVideoDecoder Decoder = new TVideoDecoder ();
-		Decoder.Texture = new Texture2D (Format.Width, Format.Height);
-		Decoder.Texture.SetPixel(0,0,Color.magenta);
-		Decoder.Texture.Apply();
+		Decoder.Texture = CreateDecoderTexture (Format.Width,Format.Height);
 
 		try
 		{
@@ -272,15 +290,25 @@ Truman:android-21 grahamr$ javap -classpath android.jar -s android.media.MediaCo
 			return null;
 		return InputBuffers [BufferIndex];
 	}
+	AndroidJavaObject GetDecoderOutputBuffer(AndroidJavaObject Decoder,int BufferIndex)
+	{
+		//AndroidJavaObject InputByteBuffer = Decoder.Call<AndroidJavaObject> ("getInputBuffer", InputBufferIndex);
+		AndroidJavaObject[] Buffers = Decoder.Call<AndroidJavaObject[]> ("getOutputBuffers");
+		int BufferCount = Buffers.Length;
+		if (BufferIndex >= BufferCount)
+			return null;
+		return Buffers [BufferIndex];
+	}
 
+		//	return false to stop (on error)
 	bool UpdateCodecInput(AndroidJavaObject Decoder,AndroidJavaObject Extractor)
 	{
 		//	get input buffer to write into codec
 		int InputBufferIndex = Decoder.Call<int> ("dequeueInputBuffer", TIMEOUT_USEC);
 		if (InputBufferIndex < 0)
-			return false;
+			return true;
 		
-		Log ("Got input buffer buffer #" + InputBufferIndex);
+		//Log ("Got input buffer buffer #" + InputBufferIndex);
 		AndroidJavaObject InputByteBuffer = GetDecoderInputBuffer (Decoder, InputBufferIndex);
 		if (InputByteBuffer == null) {
 			Log ("Error getting input buffer " + InputBufferIndex);
@@ -289,72 +317,120 @@ Truman:android-21 grahamr$ javap -classpath android.jar -s android.media.MediaCo
 		
 		//	pull latest data from extractor
 		int ChunkSize = Extractor.Call<int> ("readSampleData", InputByteBuffer, 0);
-		Log ("Extracted chunk size " + ChunkSize);
+		//Log ("Extracted chunk size " + ChunkSize);
 		if (ChunkSize < 0)
 			ChunkSize = 0;
 		long presentationTimeUs = Extractor.Call<long> ("getSampleTime");
-		Log ("decoder presentation time " + presentationTimeUs);
+		//Log ("decoder presentation time " + presentationTimeUs);
 		
 		//	fill
 		//	send to decoder
 		int Flags = ChunkSize==0 ? BUFFER_FLAG_END_OF_STREAM : 0;
 		Decoder.Call("queueInputBuffer", InputBufferIndex, 0, ChunkSize, presentationTimeUs, Flags );
-		
+
+		//	gr: seems to fail when we're out of data
 		bool AdvancedOk = Extractor.Call<bool>("advance");	//	gr: can we put this with read?
-		if (!AdvancedOk)
+		if (!AdvancedOk) {
 			Log ("Extractor.advance() returned false");
+			return false;
+		}
+		return true;
+	}
+
+	bool ChangeFormat(AndroidJavaObject NewFormat)
+	{
+		TMediaFormat MediaFormat = new TMediaFormat (NewFormat);
 
 		return true;
+	}
+
+	bool glGetError()
+	{
+		AndroidJavaClass GLES20 = new AndroidJavaClass ("android.opengl.GLES20");
+		int Error = GLES20.CallStatic<int> ("glGetError");
+		if (Error == 0)
+				return true;
+
+		Log ("GL error: " + Error);
+		return false;
 	}
 
 	bool UpdateCodecOutput(AndroidJavaObject Decoder)
 	{
 		AndroidJavaObject BufferInfo = new AndroidJavaObject("android.media.MediaCodec$BufferInfo");
-
+		
 		//	returns status if not buffer index
 		int OutputBufferIndex = Decoder.Call<int>("dequeueOutputBuffer", BufferInfo, TIMEOUT_USEC );
+		
+		//	got a format change, update texture etc
+		if ( OutputBufferIndex == INFO_OUTPUT_FORMAT_CHANGED )
+		{
+			AndroidJavaObject MediaFormat = Decoder.Call<AndroidJavaObject>("getOutputFormat");
+			if ( !ChangeFormat( MediaFormat ) )
+				return false;
 			
+			return true;
+		}
+		
 		bool Ready = true;
 		switch ( OutputBufferIndex )
 		{
-			case INFO_TRY_AGAIN_LATER:
-			case INFO_OUTPUT_BUFFERS_CHANGED:
-			case INFO_OUTPUT_FORMAT_CHANGED:
-			case OTHER_ERROR:
+		case INFO_TRY_AGAIN_LATER:
+		case INFO_OUTPUT_BUFFERS_CHANGED:
+		case INFO_OUTPUT_FORMAT_CHANGED:
+		case OTHER_ERROR:
+			Ready = false;
+			break;
+			
+		default:
+			if ( OutputBufferIndex < 0 )
 				Ready = false;
-				break;
-
-			default:
-				if ( OutputBufferIndex < 0 )
-					Ready = false;
 			break;
 		}
-	
+		
 		if ( !Ready )
 		{
 			//Log ("Not ready to output yet... " + OutputBufferIndex);
-			return false;
+			return true;
 		}
-
-		Log ("got Output buffer #" + OutputBufferIndex);
+		
+		//Log ("got Output buffer #" + OutputBufferIndex);
 		bool EndOfStream = (BufferInfo.Get<int>("flags") & BUFFER_FLAG_END_OF_STREAM) != 0;
 		if ( EndOfStream )
 		{
 			Log ("end of output stream");
 			return false;
 		}
-			
+		
+		//	grab buffer
+		AndroidJavaObject Buffer = GetDecoderOutputBuffer (Decoder, OutputBufferIndex);
+		if ( Buffer == null ) {
+			Log ("failed to get output buffer #" + OutputBufferIndex);
+			return false;
+		}
+		
 		bool DoRender = ( BufferInfo.Get<int>("size") != 0 );
-		Log ("Got buffer: render? " + DoRender);
-			
+		//Log ("Got buffer: render? " + DoRender);
+
+		//	gr: too big to copy to memory! over 1gb!?
+		//	copy to texture
+		int ByteLength = AndroidJNI.GetArrayLength (Buffer.GetRawObject ());
+		Log ("Byte buffer length: " + ByteLength);
+//		byte[] Bytes = AndroidJNI.FromByteArray (Buffer.GetRawObject ());
+		//byte[] Bytes = Buffer.Call<byte[]> ("array");
+//		Log ("Copy " + Bytes.Length + "bytes to texture!");
+
 		// As soon as we call releaseOutputBuffer, the buffer will be forwarded
 		// to SurfaceTexture to convert to a texture.  The API doesn't guarantee
 		// that the texture will be available before the call returns, so we
 		// need to wait for the onFrameAvailable callback to fire.
 		Decoder.Call("releaseOutputBuffer", OutputBufferIndex, DoRender);
+		glGetError();
+		mDecoder.SurfaceTexture.Call ("updateTexImage");
+		glGetError ();
 		//	outputSurface.awaitNewImage();
 		//	outputSurface.drawImage(true);
-
+		
 		return true;
 	}
 
@@ -362,25 +438,29 @@ Truman:android-21 grahamr$ javap -classpath android.jar -s android.media.MediaCo
 	// Update is called once per frame
 	void Update () {
 
-		try
+		if ( !mFinishedExtracting )
 		{
-			UpdateCodecInput ( mDecoder.Decoder, mExtractor );
-		}
-		catch ( Exception e )
-		{
-			Log ("UpdateCodecInput:: " + e.Message);
-		}
-		
-		
-		try
-		{
-			UpdateCodecOutput ( mDecoder.Decoder );
-		}
-		catch ( Exception e )
-		{
-			Log ("UpdateCodecOutput:: " + e.Message);
+			try
+			{
+				mFinishedExtracting = !UpdateCodecInput ( mDecoder.Decoder, mExtractor );
+			}
+			catch ( Exception e )
+			{
+				Log ("UpdateCodecInput:: " + e.Message);
+			}
 		}
 
+		if ( !mFinishedDecoding )
+		{
+			try
+			{
+				mFinishedDecoding = !UpdateCodecOutput ( mDecoder.Decoder );
+			}
+			catch ( Exception e )
+			{
+				Log ("UpdateCodecOutput:: " + e.Message);
+			}
+		}
 	}
 	
 	void OnGUI()
